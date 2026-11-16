@@ -3,19 +3,16 @@ import os
 
 import httpx
 
-
+from src.config.enums import TRESHOLD_RESOLVER
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-ITSM_API_URL = os.getenv(
-    "ITSM_API_URL",
-    "http://127.0.0.1:8001"
-)
+ITSM_API_URL = os.getenv("ITSM_API_URL","http://127.0.0.1:8001")
 
 ITSM_TIMEOUT = 10.0
 
-CONFIDENCE_THRESHOLD = 0.70
+CONFIDENCE_THRESHOLD = TRESHOLD_RESOLVER
 
 
 # ============================================================

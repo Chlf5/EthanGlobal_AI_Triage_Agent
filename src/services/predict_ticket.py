@@ -14,7 +14,7 @@ logger = get_logger("predict_ticket")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load tokenizer and multitask model once
-tokenizer = AutoTokenizer.from_pretrained(MODEL_BASE)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_BASE,use_fast=True)
 
 model = EthanMultiTaskBERT.from_pretrained(MODEL_RESOLVER)
 model.to(device)

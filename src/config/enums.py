@@ -1,0 +1,14 @@
+
+TRESHOLD_RESOLVER = 0.4
+TRESHOLD_PRIORITY = 0.4
+
+
+
+### Semantic
+ITSM_TICKETS_URL = "http://127.0.0.1:8001/tickets"
+
+MODEL_NAME_SIM = "sentence-transformers/all-MiniLM-L6-v2"
+
+SIMILARITY_THRESHOLD = 0.8
+TOP_K = 3
+REQUEST_TIMEOUT = 30

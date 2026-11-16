@@ -1,36 +1,90 @@
-
 import time
 
 from src.api.schemas import TicketRequest
 from src.config.logger import get_logger
-from src.services.predict_ticket import predict_ticket_trained
+from src.config.enums import TRESHOLD_RESOLVER, TRESHOLD_PRIORITY
 
+from src.services.predict_ticket import predict_ticket_trained
 from src.services.incident_store import (
     reserve_incident,
     save_incident_result,
     mark_incident_failed
 )
+from src.services.itsm_integration import send_to_itsm
+from src.services.semantic_duplicate_service import find_semantic_duplicates
+
 
 logger = get_logger("ticket_service.py")
 
-RESOLVER_THRESHOLD = 0.7000
-PRIORITY_THRESHOLD = 0.7000
+RESOLVER_THRESHOLD = TRESHOLD_RESOLVER
+PRIORITY_THRESHOLD = TRESHOLD_PRIORITY
 
+
+from src.services.itsm_integration import send_to_itsm
+
+
+from src.services.semantic_duplicate_service import find_semantic_duplicates
+
+
+async def handle_ticket_triage(ticket):
+
+    # 1. Check for semantic duplicates
+    duplicate_result = find_semantic_duplicates(
+        description=ticket.description,
+        ticket_id=ticket.ticket_id,
+        incident_id=getattr(ticket, "incident_id", None)
+    )
+
+    # 2. Stop if duplicate is found
+    if duplicate_result.get("possible_duplicate"):
+
+        logger.warning("Duplicate ticket detected")
+
+        return {
+            "message": "Duplicate ticket detected",
+            "ticket": ticket,
+            "semantic_duplicate_check": duplicate_result,
+            "itsm": {
+                "status": "Skipped",
+                "reason": "Duplicate ticket detected."
+            }
+        }
+
+    # 3. Process ticket using AI
+    new_ticket = process_ticket(ticket)
+
+    new_ticket["semantic_duplicate_check"] = duplicate_result
+
+    # 4. Handle existing or processing incidents
+    if new_ticket.get("triage_reused"):
+
+        itsm_result = {"status": "Skipped", "reason": "Existing triage reused."}
+
+    elif new_ticket.get("status") == "Triage In Progress":
+
+        itsm_result = {"status": "Skipped", "reason": "Triage already in progress."}
+
+    else:
+
+        # 5. Send to ITSM
+        itsm_result = await send_to_itsm(new_ticket)
+
+    # 6. Return result
+    return {
+        "message": "Ticket triage completed",
+        "ticket": new_ticket,
+        "semantic_duplicate_check": duplicate_result,
+        "itsm": itsm_result
+    }
 
 def finalize_response(result: dict, start_time: float) -> dict:
-    """
-    Add service processing time to the response.
-    """
+
     elapsed_seconds = time.perf_counter() - start_time
 
     result["processing_time_seconds"] = round(elapsed_seconds, 6)
     result["processing_time_ms"] = round(elapsed_seconds * 1000, 2)
 
-    logger.info(
-        "Ticket %s processed in %.2f ms",
-        result.get("ticket_id"),
-        result["processing_time_ms"]
-    )
+    logger.info("Ticket %s processed in %.2f ms",result.get("ticket_id"),result["processing_time_ms"])
 
     return result
 

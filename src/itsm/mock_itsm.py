@@ -7,6 +7,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from src.config.enums import TRESHOLD_PRIORITY,TRESHOLD_RESOLVER
 
 
 # ============================================================
@@ -17,22 +18,19 @@ app = FastAPI(title="Ethan Global - Mock ITSM")
 
 AI_API_URL = "http://127.0.0.1:8000/triage"
 
-CONFIDENCE_THRESHOLD = 0.70
+CONFIDENCE_THRESHOLD = TRESHOLD_PRIORITY
 MAX_UPDATES_PER_MINUTE = 10
 AI_TIMEOUT_SECONDS = 30
+
+VALID_PRIORITIES = {"P1", "P2", "P3", "P4"}
 
 
 # ============================================================
 # IN-MEMORY DATABASE
 # ============================================================
 
-# All tickets submitted to the ITSM system.
 TICKETS = {}
-
-# Incident-level assignments.
 INCIDENTS = {}
-
-# Audit history.
 AUDIT_LOG = []
 
 
@@ -50,6 +48,10 @@ class AIIncidentResult(BaseModel):
     ticket_id: str
     incident_id: str
 
+    # Optional for compatibility with older AI callback payloads.
+    # The description is preserved if the ticket already exists.
+    description: Optional[str] = None
+
     resolver_group: str
     priority: str = Field(pattern=r"^P[1-4]$")
 
@@ -62,7 +64,6 @@ class AIIncidentResult(BaseModel):
 class IncidentUpdate(BaseModel):
     incident_id: str
     ticket_id: Optional[str] = None
-
     resolver_group: str
     priority: str = Field(pattern=r"^P[1-4]$")
 
@@ -79,7 +80,8 @@ def clean_audit_log():
     cutoff = current_time() - timedelta(minutes=1)
 
     AUDIT_LOG[:] = [
-        entry for entry in AUDIT_LOG
+        entry
+        for entry in AUDIT_LOG
         if datetime.fromisoformat(entry["timestamp"]) > cutoff
     ]
 
@@ -87,21 +89,32 @@ def clean_audit_log():
 def check_update_limit():
     clean_audit_log()
 
-    if len(AUDIT_LOG) >= MAX_UPDATES_PER_MINUTE:
+    manual_updates = sum(
+        1 for entry in AUDIT_LOG
+        if entry.get("action") == "Manual Human Validation"
+    )
+
+    if manual_updates >= MAX_UPDATES_PER_MINUTE:
         raise HTTPException(
             status_code=429,
             detail="Maximum of 10 manual updates per minute reached."
         )
 
 
-def needs_human_validation(resolver_confidence, priority_confidence):
+def needs_human_validation(
+    resolver_confidence,
+    priority_confidence
+):
     return (
         resolver_confidence < CONFIDENCE_THRESHOLD
         or priority_confidence < CONFIDENCE_THRESHOLD
     )
 
 
-def get_review_reasons(resolver_confidence, priority_confidence):
+def get_review_reasons(
+    resolver_confidence,
+    priority_confidence
+):
     reasons = []
 
     if resolver_confidence < CONFIDENCE_THRESHOLD:
@@ -113,113 +126,142 @@ def get_review_reasons(resolver_confidence, priority_confidence):
     return reasons
 
 
-def get_ticket_category(ticket):
-    if ticket.get("requires_human_review"):
-        return "Needs Human Validation"
-
-    return "Automatically Assigned"
-
-
 def save_ticket(ticket):
-    TICKETS[ticket["ticket_id"]] = ticket
-
-
-def normalize_ai_ticket(data):
     """
-    Supports the AI API response containing either:
-    - resolver_group / priority
-    - resolver_prediction / priority_prediction
+    Save a ticket while preserving its description
+    if a later update does not contain one.
     """
 
-    ticket = data.get("ticket", data)
+    ticket_id = ticket["ticket_id"]
+
+    existing = TICKETS.get(ticket_id, {})
+
+    if not ticket.get("description"):
+        ticket["description"] = existing.get("description", "")
+
+    TICKETS[ticket_id] = ticket
+
+    return ticket
+
+
+# ============================================================
+# NORMALIZE AI RESPONSE
+# ============================================================
+
+def normalize_ai_ticket(data, request):
+
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="AI API returned an invalid response."
+        )
+
+    ticket = data.get("ticket")
 
     if not isinstance(ticket, dict):
-        return None
+        raise HTTPException(
+            status_code=502,
+            detail="AI API did not return a valid ticket object."
+        )
 
-    resolver = ticket.get("resolver_group")
+    prediction = ticket.get("resolver_prediction")
 
-    if resolver is None:
-        resolver = ticket.get("resolver_prediction")
+    if not isinstance(prediction, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="AI API did not return resolver_prediction."
+        )
 
-    if isinstance(resolver, dict):
-        resolver = resolver.get("label") or resolver.get("prediction")
-
-    priority = ticket.get("priority")
-
-    if priority is None:
-        priority = ticket.get("priority_prediction")
-
-    if isinstance(priority, dict):
-        priority = priority.get("label") or priority.get("prediction")
-
-    resolver_confidence = ticket.get("resolver_confidence")
-
-    if resolver_confidence is None:
-        resolver_confidence = ticket.get("confidence", 0)
-
-    priority_confidence = ticket.get("priority_confidence", 0)
+    resolver = prediction.get("resolver_group")
+    priority = prediction.get("priority")
 
     try:
-        resolver_confidence = float(resolver_confidence)
-        priority_confidence = float(priority_confidence)
+        resolver_confidence = float(
+            prediction.get("resolver_confidence")
+        )
+
+        priority_confidence = float(
+            prediction.get("priority_confidence")
+        )
+
     except (TypeError, ValueError):
-        return None
+        raise HTTPException(
+            status_code=502,
+            detail="AI API returned invalid confidence values."
+        )
 
-    if not resolver or priority not in {"P1", "P2", "P3", "P4"}:
-        return None
+    if not resolver:
+        raise HTTPException(
+            status_code=502,
+            detail="AI API did not return a resolver group."
+        )
 
-    ticket_id = ticket.get("ticket_id")
+    if priority not in VALID_PRIORITIES:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Invalid priority returned: {priority}"
+        )
 
-    if not ticket_id:
-        return None
+    if not 0 <= resolver_confidence <= 1:
+        raise HTTPException(
+            status_code=502,
+            detail="Invalid resolver confidence."
+        )
+
+    if not 0 <= priority_confidence <= 1:
+        raise HTTPException(
+            status_code=502,
+            detail="Invalid priority confidence."
+        )
+
+    ticket_id = ticket.get("ticket_id") or request.ticket_id
 
     incident_id = (
         ticket.get("incident_id")
+        or request.incident_id
         or ticket_id
     )
 
-    requires_review = needs_human_validation(
-        resolver_confidence,
-        priority_confidence
+    description = (
+        ticket.get("description")
+        or request.description
     )
+
+    if not description:
+        raise HTTPException(
+            status_code=502,
+            detail="Ticket description is missing."
+        )
 
     return {
         "ticket_id": ticket_id,
         "incident_id": incident_id,
-        "description": ticket.get("description", ""),
+        "description": description,
         "resolver_group": resolver,
         "priority": priority,
         "resolver_confidence": resolver_confidence,
         "priority_confidence": priority_confidence,
-        "requires_human_review": requires_review,
-        "review_reasons": get_review_reasons(
+        "requires_human_review": needs_human_validation(
             resolver_confidence,
             priority_confidence
         ),
-        "status": (
-            "Pending Human Review"
-            if requires_review
-            else "Assigned"
+        "review_reasons": get_review_reasons(
+            resolver_confidence,
+            priority_confidence
         ),
         "triage_reused": ticket.get("triage_reused", False),
         "created_at": ticket.get(
             "created_at",
             current_time().isoformat()
-        ),
-        "last_updated": current_time().isoformat()
+        )
     }
 
 
+# ============================================================
+# INCIDENT MANAGEMENT
+# ============================================================
+
 def store_ai_result(result: AIIncidentResult):
-    """
-    Save the AI recommendation.
-
-    High confidence:
-        Automatically assign the incident.
-
-    Low confidence:
-        Store recommendation and wait for human validation.
-    """
 
     needs_review = needs_human_validation(
         result.resolver_confidence,
@@ -235,6 +277,28 @@ def store_ai_result(result: AIIncidentResult):
 
     existing = INCIDENTS.get(result.incident_id, {})
 
+    # Preserve existing human-validated assignments.
+    if existing.get("status") == "Assigned - Human Validated":
+
+        incident = {
+            **existing,
+            "ticket_id": result.ticket_id,
+            "recommended_assignment_group": result.resolver_group,
+            "recommended_priority": result.priority,
+            "resolver_confidence": result.resolver_confidence,
+            "priority_confidence": result.priority_confidence,
+            "last_updated": now
+        }
+
+        INCIDENTS[result.incident_id] = incident
+
+        return {
+            "status": "Success",
+            "automatic_assignment": False,
+            "message": "Existing human-validated assignment preserved.",
+            "incident": incident
+        }
+
     if needs_review:
 
         incident = {
@@ -242,11 +306,9 @@ def store_ai_result(result: AIIncidentResult):
             "incident_id": result.incident_id,
             "ticket_id": result.ticket_id,
 
-            # Keep existing actual assignment, if one exists.
             "assignment_group": existing.get("assignment_group"),
             "priority": existing.get("priority"),
 
-            # Store AI recommendations separately.
             "recommended_assignment_group": result.resolver_group,
             "recommended_priority": result.priority,
 
@@ -318,7 +380,6 @@ async def dashboard():
 <html>
 <head>
     <title>Ethan Global - Mock ITSM</title>
-
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <style>
@@ -330,16 +391,12 @@ async def dashboard():
             color: #222;
         }
 
-        h1, h2 {
-            margin-top: 0;
-        }
-
         .container {
-            max-width: 1400px;
+            max-width: 1600px;
             margin: auto;
         }
 
-        .section {
+        .section, .stat {
             background: white;
             padding: 20px;
             border-radius: 10px;
@@ -351,13 +408,6 @@ async def dashboard():
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 15px;
-            margin-bottom: 20px;
-        }
-
-        .stat {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
         }
 
         .stat strong {
@@ -385,36 +435,47 @@ async def dashboard():
             margin: 3px;
         }
 
-        button:hover {
-            opacity: .85;
-        }
-
-        button.secondary {
-            background: #555;
-        }
-
-        button.success {
-            background: #16834a;
-        }
+        button.secondary { background: #555; }
+        button.success { background: #16834a; }
 
         table {
             width: 100%;
             border-collapse: collapse;
-            min-width: 850px;
+            min-width: 1100px;
         }
 
         th, td {
             text-align: left;
             padding: 11px;
             border-bottom: 1px solid #eee;
+            vertical-align: top;
         }
 
         th {
             background: #f5f6f8;
+            white-space: nowrap;
         }
 
-        .table-container {
-            overflow-x: auto;
+        .table-container { overflow-x: auto; }
+
+        .description-cell {
+            min-width: 260px;
+            max-width: 400px;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            line-height: 1.5;
+        }
+
+        .ticket-description {
+            padding: 12px 15px;
+            margin: 7px 0 14px;
+            background: #f5f7fa;
+            border-left: 4px solid #2457c5;
+            border-radius: 5px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            min-height: 35px;
         }
 
         .badge {
@@ -442,15 +503,8 @@ async def dashboard():
             display: none;
         }
 
-        .error {
-            background: #ffe0e0;
-            color: #9b1515;
-        }
-
-        .info {
-            background: #e6efff;
-            color: #174b9c;
-        }
+        .error { background: #ffe0e0; color: #9b1515; }
+        .info { background: #e6efff; color: #174b9c; }
 
         .tabs {
             display: flex;
@@ -459,9 +513,7 @@ async def dashboard():
             margin-bottom: 15px;
         }
 
-        .tabs button.active {
-            background: #142d63;
-        }
+        .tabs button.active { background: #142d63; }
 
         .form-grid {
             display: grid;
@@ -470,13 +522,9 @@ async def dashboard():
         }
 
         @media(max-width: 750px) {
-            .stats {
-                grid-template-columns: 1fr 1fr;
-            }
-
-            .form-grid {
-                grid-template-columns: 1fr;
-            }
+            body { padding: 12px; }
+            .stats { grid-template-columns: 1fr 1fr; }
+            .form-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -488,46 +536,32 @@ async def dashboard():
     <p>AI ticket triage and human validation dashboard</p>
 
     <div class="stats">
-        <div class="stat">
-            Total Tickets
+        <div class="stat">Total Tickets
             <strong id="totalTickets">0</strong>
         </div>
-
-        <div class="stat">
-            Needs Human Validation
+        <div class="stat">Needs Human Validation
             <strong id="reviewCount">0</strong>
         </div>
-
-        <div class="stat">
-            Automatically Assigned
+        <div class="stat">Automatically Assigned
             <strong id="assignedCount">0</strong>
         </div>
-
-        <div class="stat">
-            Total Incidents
+        <div class="stat">Total Incidents
             <strong id="incidentCount">0</strong>
         </div>
     </div>
-
-
-    <!-- SUBMIT TICKET -->
 
     <div class="section">
         <h2>Submit Ticket for AI Triage</h2>
 
         <form id="triageForm">
-
             <div class="form-grid">
                 <div>
                     <label>Ticket ID</label>
-                    <input id="ticketId" required
-                           placeholder="INC1001">
+                    <input id="ticketId" required placeholder="TKT1001">
                 </div>
-
                 <div>
                     <label>Incident ID</label>
-                    <input id="incidentId"
-                           placeholder="GROUP100">
+                    <input id="incidentId" placeholder="INC1001">
                 </div>
             </div>
 
@@ -542,9 +576,6 @@ async def dashboard():
         <div id="triageMessage" class="message"></div>
     </div>
 
-
-    <!-- TICKET CATEGORIES -->
-
     <div class="section">
         <h2>All Tickets</h2>
 
@@ -552,11 +583,9 @@ async def dashboard():
             <button class="active" onclick="loadTickets('all', this)">
                 All Tickets
             </button>
-
             <button onclick="loadTickets('review', this)">
                 Needs Human Validation
             </button>
-
             <button onclick="loadTickets('assigned', this)">
                 Automatically Assigned
             </button>
@@ -568,6 +597,7 @@ async def dashboard():
                     <tr>
                         <th>Ticket ID</th>
                         <th>Incident ID</th>
+                        <th>Ticket Description</th>
                         <th>Resolver Group</th>
                         <th>Resolver Confidence</th>
                         <th>Priority</th>
@@ -576,27 +606,24 @@ async def dashboard():
                         <th>Action</th>
                     </tr>
                 </thead>
-
                 <tbody id="ticketTable"></tbody>
             </table>
         </div>
     </div>
 
-
-    <!-- HUMAN VALIDATION -->
-
     <div class="section" id="manualSection" style="display:none">
         <h2>Human Validation and Assignment</h2>
-
         <p id="reviewInformation"></p>
 
         <form id="manualForm">
-
             <label>Ticket ID</label>
             <input id="manualTicketId" readonly>
 
             <label>Incident ID</label>
             <input id="manualIncidentId" readonly>
+
+            <label>Ticket Description</label>
+            <div id="manualDescription" class="ticket-description"></div>
 
             <label>Resolver Group</label>
             <input id="manualResolverGroup" required>
@@ -622,12 +649,8 @@ async def dashboard():
         <div id="manualMessage" class="message"></div>
     </div>
 
-
-    <!-- INCIDENTS -->
-
     <div class="section">
         <h2>Incident Records</h2>
-
         <div class="table-container">
             <table>
                 <thead>
@@ -640,18 +663,13 @@ async def dashboard():
                         <th>Last Updated</th>
                     </tr>
                 </thead>
-
                 <tbody id="incidentTable"></tbody>
             </table>
         </div>
     </div>
 
-
-    <!-- AUDIT -->
-
     <div class="section">
         <h2>Audit Log</h2>
-
         <div class="table-container">
             <table>
                 <thead>
@@ -665,7 +683,6 @@ async def dashboard():
                         <th>Performed By</th>
                     </tr>
                 </thead>
-
                 <tbody id="auditTable"></tbody>
             </table>
         </div>
@@ -673,15 +690,12 @@ async def dashboard():
 
 </div>
 
-
 <script>
-
 let currentCategory = "all";
 
 
 function showMessage(elementId, message, type = "info") {
     const element = document.getElementById(elementId);
-
     element.style.display = "block";
     element.className = "message " + type;
     element.textContent = message;
@@ -701,18 +715,20 @@ function escapeHtml(value) {
 
 async function api(url, options = {}) {
     const response = await fetch(url, {
+        ...options,
         headers: {
             "Content-Type": "application/json",
             ...(options.headers || {})
-        },
-        ...options
+        }
     });
 
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
         throw new Error(
-            JSON.stringify(data.detail ?? data)
+            typeof data.detail === "string"
+                ? data.detail
+                : JSON.stringify(data.detail ?? data)
         );
     }
 
@@ -721,7 +737,7 @@ async function api(url, options = {}) {
 
 
 // ============================================================
-// LOAD STATISTICS
+// STATISTICS
 // ============================================================
 
 async function loadStats() {
@@ -747,7 +763,7 @@ async function loadStats() {
 
 
 // ============================================================
-// LOAD TICKETS BY CATEGORY
+// TICKETS
 // ============================================================
 
 async function loadTickets(category = currentCategory, button = null) {
@@ -779,12 +795,11 @@ async function loadTickets(category = currentCategory, button = null) {
         }
 
         const tbody = document.getElementById("ticketTable");
-
         tbody.innerHTML = "";
 
         if (tickets.length === 0) {
             tbody.innerHTML =
-                "<tr><td colspan='8'>No tickets found.</td></tr>";
+                "<tr><td colspan='9'>No tickets found.</td></tr>";
             return;
         }
 
@@ -793,20 +808,32 @@ async function loadTickets(category = currentCategory, button = null) {
 
             const badge = review
                 ? '<span class="badge review">Needs Human Validation</span>'
-                : '<span class="badge assigned">Automatically Assigned</span>';
+                : '<span class="badge assigned">Assigned</span>';
 
             const action = review
-                ? `<button onclick="openManualForm('${escapeHtml(ticket.ticket_id)}')">Validate</button>`
-                : `<button class="secondary" onclick="viewTicket('${escapeHtml(ticket.ticket_id)}')">View</button>`;
+                ? `<button data-action="validate"
+                    data-ticket-id="${escapeHtml(ticket.ticket_id)}">Validate</button>`
+                : `<button class="secondary" data-action="view"
+                    data-ticket-id="${escapeHtml(ticket.ticket_id)}">View</button>`;
+
+            const resolverConfidence =
+                (Number(ticket.resolver_confidence || 0) * 100).toFixed(2);
+
+            const priorityConfidence =
+                (Number(ticket.priority_confidence || 0) * 100).toFixed(2);
+
+            const description =
+                ticket.description || "No description available.";
 
             tbody.innerHTML += `
                 <tr>
                     <td>${escapeHtml(ticket.ticket_id)}</td>
                     <td>${escapeHtml(ticket.incident_id)}</td>
+                    <td class="description-cell">${escapeHtml(description)}</td>
                     <td>${escapeHtml(ticket.resolver_group)}</td>
-                    <td>${(ticket.resolver_confidence * 100).toFixed(2)}%</td>
+                    <td>${resolverConfidence}%</td>
                     <td>${escapeHtml(ticket.priority)}</td>
-                    <td>${(ticket.priority_confidence * 100).toFixed(2)}%</td>
+                    <td>${priorityConfidence}%</td>
                     <td>${badge}</td>
                     <td>${action}</td>
                 </tr>
@@ -820,7 +847,31 @@ async function loadTickets(category = currentCategory, button = null) {
 
 
 // ============================================================
-// OPEN HUMAN VALIDATION FORM
+// TICKET TABLE ACTIONS
+// ============================================================
+
+document.getElementById("ticketTable").addEventListener(
+    "click",
+    async function(event) {
+        const button = event.target.closest("button[data-action]");
+
+        if (!button) return;
+
+        const ticketId = button.dataset.ticketId;
+
+        if (button.dataset.action === "validate") {
+            await openManualForm(ticketId);
+        }
+
+        if (button.dataset.action === "view") {
+            await viewTicket(ticketId);
+        }
+    }
+);
+
+
+// ============================================================
+// HUMAN VALIDATION FORM
 // ============================================================
 
 async function openManualForm(ticketId) {
@@ -837,11 +888,14 @@ async function openManualForm(ticketId) {
         document.getElementById("manualIncidentId").value =
             ticket.incident_id;
 
+        document.getElementById("manualDescription").textContent =
+            ticket.description || "No description available.";
+
         document.getElementById("manualResolverGroup").value =
-            ticket.resolver_group;
+            ticket.resolver_group || "";
 
         document.getElementById("manualPriority").value =
-            ticket.priority;
+            ticket.priority || "P4";
 
         document.getElementById("reviewInformation").textContent =
             "Resolver confidence: " +
@@ -866,6 +920,10 @@ function closeManualForm() {
 }
 
 
+// ============================================================
+// VIEW TICKET
+// ============================================================
+
 async function viewTicket(ticketId) {
     try {
         const ticket = await api(
@@ -875,6 +933,7 @@ async function viewTicket(ticketId) {
         alert(
             "Ticket: " + ticket.ticket_id +
             "\\nIncident: " + ticket.incident_id +
+            "\\nDescription: " + (ticket.description || "Not available") +
             "\\nResolver: " + ticket.resolver_group +
             "\\nPriority: " + ticket.priority +
             "\\nResolver confidence: " +
@@ -891,7 +950,7 @@ async function viewTicket(ticketId) {
 
 
 // ============================================================
-// SUBMIT TICKET TO AI API
+// SUBMIT TICKET FOR AI TRIAGE
 // ============================================================
 
 document.getElementById("triageForm").addEventListener(
@@ -901,8 +960,10 @@ document.getElementById("triageForm").addEventListener(
 
         const payload = {
             ticket_id: document.getElementById("ticketId").value.trim(),
-            incident_id: document.getElementById("incidentId").value.trim() || null,
-            description: document.getElementById("description").value.trim()
+            incident_id:
+                document.getElementById("incidentId").value.trim() || null,
+            description:
+                document.getElementById("description").value.trim()
         };
 
         try {
@@ -913,31 +974,26 @@ document.getElementById("triageForm").addEventListener(
 
             const ticket = data.ticket || {};
 
-            if (data.itsm && data.itsm.status === "Failure") {
+            if (data.itsm?.automatic_assignment) {
                 showMessage(
                     "triageMessage",
-                    "AI triage completed, but the ITSM callback failed: " +
-                    (data.itsm.message || "Unknown error"),
-                    "error"
+                    "AI triage completed. Ticket automatically assigned.",
+                    "info"
                 );
             } else {
                 showMessage(
                     "triageMessage",
-                    "Ticket submitted for AI triage. Refreshing ticket records.",
+                    "AI triage completed. Human validation is required.",
                     "info"
                 );
             }
 
+            document.getElementById("triageForm").reset();
+
             await refreshDashboard();
 
-            if (ticket.ticket_id) {
-                const saved = await api(
-                    `/tickets/${encodeURIComponent(ticket.ticket_id)}`
-                );
-
-                if (saved.requires_human_review) {
-                    await openManualForm(saved.ticket_id);
-                }
+            if (ticket.ticket_id && ticket.requires_human_review) {
+                await openManualForm(ticket.ticket_id);
             }
 
         } catch (error) {
@@ -959,23 +1015,17 @@ document.getElementById("manualForm").addEventListener(
         const incidentId =
             document.getElementById("manualIncidentId").value.trim();
 
+        const ticketId =
+            document.getElementById("manualTicketId").value;
+
         const payload = {
             incident_id: incidentId,
-            ticket_id: document.getElementById("manualTicketId").value,
+            ticket_id: ticketId,
             resolver_group:
                 document.getElementById("manualResolverGroup").value.trim(),
             priority:
                 document.getElementById("manualPriority").value
         };
-
-        if (!incidentId) {
-            showMessage(
-                "manualMessage",
-                "A valid incident ID is required.",
-                "error"
-            );
-            return;
-        }
 
         try {
             const result = await api(
@@ -1003,13 +1053,12 @@ document.getElementById("manualForm").addEventListener(
 
 
 // ============================================================
-// LOAD INCIDENTS
+// INCIDENTS
 // ============================================================
 
 async function loadIncidents() {
     try {
         const data = await api("/incidents");
-
         const tbody = document.getElementById("incidentTable");
 
         tbody.innerHTML = "";
@@ -1044,16 +1093,21 @@ async function loadIncidents() {
 
 
 // ============================================================
-// LOAD AUDIT LOG
+// AUDIT LOG
 // ============================================================
 
 async function loadAudit() {
     try {
         const data = await api("/audit");
-
         const tbody = document.getElementById("auditTable");
 
         tbody.innerHTML = "";
+
+        if (!data.audit.length) {
+            tbody.innerHTML =
+                "<tr><td colspan='7'>No audit records found.</td></tr>";
+            return;
+        }
 
         data.audit.forEach(item => {
             tbody.innerHTML += `
@@ -1088,11 +1142,9 @@ async function refreshDashboard() {
     ]);
 }
 
-
 refreshDashboard();
 
 </script>
-
 </body>
 </html>
 """)
@@ -1118,7 +1170,6 @@ async def ai_triage(request: AITriageRequest):
             )
 
             response.raise_for_status()
-
             data = response.json()
 
     except httpx.TimeoutException:
@@ -1127,41 +1178,91 @@ async def ai_triage(request: AITriageRequest):
             detail="AI API request timed out."
         )
 
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI API returned {exc.response.status_code}: "
+                   f"{exc.response.text}"
+        )
+
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
             detail=f"Could not connect to AI API: {str(exc)}"
         )
 
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=exc.response.status_code,
-            detail=exc.response.text
+    normalized = normalize_ai_ticket(data, request)
+
+    existing_ticket = TICKETS.get(
+        normalized["ticket_id"],
+        {}
+    )
+
+    # Create the incident result.
+    result = AIIncidentResult(
+        ticket_id=normalized["ticket_id"],
+        incident_id=normalized["incident_id"],
+        description=normalized["description"],
+        resolver_group=normalized["resolver_group"],
+        priority=normalized["priority"],
+        resolver_confidence=normalized["resolver_confidence"],
+        priority_confidence=normalized["priority_confidence"],
+        review_reasons=normalized["review_reasons"]
+    )
+
+    # Store incident and AI recommendation.
+    itsm_result = store_ai_result(result)
+
+    human_validated = (
+        INCIDENTS.get(result.incident_id, {}).get("status")
+        == "Assigned - Human Validated"
+    )
+
+    needs_review = (
+        needs_human_validation(
+            result.resolver_confidence,
+            result.priority_confidence
         )
+        and not human_validated
+    )
 
-    # Save the ticket returned by the AI API.
-    normalized = normalize_ai_ticket(data)
+    # Preserve the description and existing ticket fields.
+    ticket_record = {
+        **existing_ticket,
+        **normalized,
+        "description": normalized["description"],
+        "requires_human_review": needs_review,
+        "review_reasons": (
+            get_review_reasons(
+                result.resolver_confidence,
+                result.priority_confidence
+            )
+            if needs_review
+            else []
+        ),
+        "status": (
+            "Assigned - Human Validated"
+            if human_validated
+            else "Pending Human Review"
+            if needs_review
+            else "Assigned"
+        ),
+        "last_updated": current_time().isoformat()
+    }
 
-    if normalized:
-        existing = TICKETS.get(normalized["ticket_id"], {})
+    save_ticket(ticket_record)
 
-        # Do not overwrite an already completed manual assignment.
-        if existing.get("status") == "Assigned - Human Validated":
-            normalized.update({
-                "requires_human_review": False,
-                "status": "Assigned - Human Validated"
-            })
-
-        save_ticket({
-            **existing,
-            **normalized
-        })
-
-    return data
+    return {
+        "status": "Success",
+        "message": "AI triage completed successfully.",
+        "ticket": ticket_record,
+        "itsm": itsm_result,
+        "ai_response": data
+    }
 
 
 # ============================================================
-# AI CALLBACK: AUTOMATIC ASSIGNMENT OR HUMAN REVIEW
+# AI CALLBACK ENDPOINT
 # ============================================================
 
 @app.post("/incidents/{incident_id}/ai-result")
@@ -1176,28 +1277,53 @@ async def receive_ai_result(
             detail="Incident ID in URL does not match request body."
         )
 
+    # Save or update incident.
     result_data = store_ai_result(result)
 
-    # Update ticket record.
     existing = TICKETS.get(result.ticket_id, {})
 
-    needs_review = not result_data["automatic_assignment"]
+    human_validated = (
+        INCIDENTS.get(incident_id, {}).get("status")
+        == "Assigned - Human Validated"
+    )
+
+    needs_review = (
+        needs_human_validation(
+            result.resolver_confidence,
+            result.priority_confidence
+        )
+        and not human_validated
+    )
+
+    # Preserve existing description if callback does not contain it.
+    description = (
+        result.description
+        or existing.get("description")
+        or ""
+    )
 
     ticket = {
         **existing,
         "ticket_id": result.ticket_id,
         "incident_id": result.incident_id,
+        "description": description,
         "resolver_group": result.resolver_group,
         "priority": result.priority,
         "resolver_confidence": result.resolver_confidence,
         "priority_confidence": result.priority_confidence,
         "requires_human_review": needs_review,
-        "review_reasons": get_review_reasons(
-            result.resolver_confidence,
-            result.priority_confidence
+        "review_reasons": (
+            get_review_reasons(
+                result.resolver_confidence,
+                result.priority_confidence
+            )
+            if needs_review
+            else []
         ),
         "status": (
-            "Pending Human Review"
+            "Assigned - Human Validated"
+            if human_validated
+            else "Pending Human Review"
             if needs_review
             else "Assigned"
         ),
@@ -1206,7 +1332,12 @@ async def receive_ai_result(
 
     save_ticket(ticket)
 
-    return result_data
+    return {
+        "status": "Success",
+        "message": "AI result received and ticket updated.",
+        "ticket": ticket,
+        "incident": result_data["incident"]
+    }
 
 
 # ============================================================
@@ -1247,10 +1378,11 @@ async def update_incident(
 
     INCIDENTS[incident_id] = incident
 
-    # Mark all tickets belonging to this incident as validated.
+    # Update every ticket belonging to this incident.
     for ticket in TICKETS.values():
 
         if ticket.get("incident_id") == incident_id:
+
             ticket["requires_human_review"] = False
             ticket["status"] = "Assigned - Human Validated"
             ticket["review_reasons"] = []
@@ -1296,7 +1428,8 @@ async def get_tickets():
 async def get_tickets_needing_validation():
 
     tickets = [
-        ticket for ticket in TICKETS.values()
+        ticket
+        for ticket in TICKETS.values()
         if ticket.get("requires_human_review")
     ]
 
@@ -1314,7 +1447,8 @@ async def get_tickets_needing_validation():
 async def get_automatically_assigned_tickets():
 
     tickets = [
-        ticket for ticket in TICKETS.values()
+        ticket
+        for ticket in TICKETS.values()
         if not ticket.get("requires_human_review")
     ]
 
