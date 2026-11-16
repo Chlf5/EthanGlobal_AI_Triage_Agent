@@ -26,23 +26,19 @@ OUTPUT_EXCEL = Path("test/scripts/ethan_api_test_report.xlsx")
 REQUEST_TIMEOUT = 60
 REQUEST_DELAY = 0.1
 
-# More challenging test distribution.
 DIFFICULTY_DISTRIBUTION = {
     "Easy": 0.10,
     "Medium": 0.20,
     "Hard": 0.70
 }
 
-# Unique ID for every execution.
 RUN_ID = uuid.uuid4().hex[:8].upper()
-
 RUN_TIMESTAMP = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 RANDOM_STATE = int(RUN_ID, 16)
 
 
 # ============================================================
-# DISPLAY CONFIGURATION
+# DISPLAY
 # ============================================================
 
 print("=" * 80)
@@ -53,7 +49,6 @@ print(f"Run ID:        {RUN_ID}")
 print(f"Timestamp:     {RUN_TIMESTAMP}")
 print(f"API URL:       {API_URL}")
 print(f"Maximum tests: {MAX_TICKETS}")
-
 print("Distribution:  10% Easy | 20% Medium | 70% Hard")
 
 print("=" * 80)
@@ -81,326 +76,161 @@ def load_dataset():
 
     else:
         raise ValueError(
-            "Dataset must contain 'text' or 'description'."
+            f"Dataset must contain 'description' or 'text'. "
+            f"Available columns: {df.columns.tolist()}"
         )
 
-    required_columns = [
-        "resolver_group",
-        "priority"
-    ]
+    required_columns = ["resolver_group", "priority"]
 
     for column in required_columns:
-
         if column not in df.columns:
             raise ValueError(
                 f"Missing dataset column: {column}"
             )
 
-    # Remove incomplete records.
-    df = df.dropna(
-        subset=[
-            description_column,
-            "resolver_group",
-            "priority"
-        ]
-    ).copy()
-
-    # Normalize descriptions.
-    df[description_column] = (
+    # Create a consistent description column.
+    df["description"] = (
         df[description_column]
+        .fillna("")
         .astype(str)
         .str.strip()
     )
 
-    # Normalize resolver groups.
     df["resolver_group"] = (
         df["resolver_group"]
+        .fillna("")
         .astype(str)
         .str.strip()
     )
 
-    # Normalize priorities.
     df["priority"] = (
         df["priority"]
+        .fillna("")
         .astype(str)
         .str.upper()
         .str.strip()
     )
 
-    # Remove empty descriptions.
+    # Remove invalid records.
     df = df[
-        df[description_column].str.len() >= 5
+        (df["description"].str.len() >= 5)
+        & (df["resolver_group"].str.len() > 0)
+        & (df["priority"].isin(["P1", "P2", "P3", "P4"]))
     ].copy()
 
-    # Keep valid priorities.
-    df = df[
-        df["priority"].isin(["P1", "P2", "P3", "P4"])
-    ].copy()
-
-    # Remove empty resolver labels.
-    df = df[
-        df["resolver_group"].str.len() > 0
-    ].copy()
+    df.reset_index(drop=True, inplace=True)
 
     if df.empty:
-        raise ValueError(
-            "No valid tickets found in dataset."
-        )
+        raise ValueError("No valid tickets found in dataset.")
 
     print(f"\nDataset loaded: {len(df)} tickets")
-
-    print(
-        f"Resolver groups: "
-        f"{df['resolver_group'].nunique()}"
-    )
-
-    print(
-        f"Priority classes: "
-        f"{df['priority'].nunique()}"
-    )
-
-    print(
-        f"Description column: {description_column}"
-    )
+    print(f"Resolver groups: {df['resolver_group'].nunique()}")
+    print(f"Priority classes: {df['priority'].nunique()}")
+    print(f"Original description column: {description_column}")
 
     print("\nSample description:")
-    print(df[description_column].iloc[0])
+    print(df["description"].iloc[0])
 
-    return df, description_column
+    return df
 
 
 # ============================================================
 # CALCULATE DESCRIPTION COMPLEXITY
 # ============================================================
 
+TECHNICAL_TERMS = [
+    "server", "database", "network", "firewall", "vpn",
+    "dns", "dhcp", "domain controller", "authentication",
+    "authorization", "certificate", "encryption", "endpoint",
+    "configuration", "integration", "synchronization",
+    "infrastructure", "deployment", "application", "api",
+    "sql", "driver", "firmware", "router", "switch",
+    "latency", "timeout", "permission", "access denied",
+    "service unavailable", "memory", "cpu", "disk space",
+    "backup", "replication", "load balancer", "active directory",
+    "identity provider", "virtual machine", "container",
+    "kubernetes", "storage array", "failover", "cluster",
+    "ssl", "tls", "proxy", "certificate authority",
+    "single sign-on", "sso", "mfa", "ldap",
+    "microservice", "api gateway", "data pipeline",
+    "message queue", "cloud infrastructure", "operating system",
+    "power supply", "raid controller"
+]
+
+COMPLEXITY_INDICATORS = [
+    "multiple", "several", "intermittent", "simultaneously",
+    "across departments", "all users", "entire department",
+    "production", "business critical", "outage",
+    "after the update", "after deployment",
+    "following the migration", "root cause", "dependency",
+    "cascading", "recurring", "unpredictable", "inconsistent",
+    "partial failure", "degraded performance", "data corruption",
+    "synchronization failure", "service disruption",
+    "authentication errors", "connection failures",
+    "while", "although", "however", "in addition",
+    "as a result", "at the same time", "without warning",
+    "across multiple systems"
+]
+
+IMPACT_INDICATORS = [
+    "critical", "urgent", "business impact", "financial impact",
+    "security breach", "data loss", "data integrity",
+    "unauthorized access", "ransomware", "compliance",
+    "customer impact", "system-wide", "enterprise-wide",
+    "mission critical", "complete outage", "unavailable",
+    "failed transactions", "production environment",
+    "business operations", "sensitive information",
+    "service interruption", "multiple departments",
+    "customer records"
+]
+
+INVESTIGATION_INDICATORS = [
+    "investigate", "diagnose", "troubleshoot",
+    "identify the root cause", "logs indicate",
+    "monitoring shows", "correlation", "configuration mismatch",
+    "dependency failure", "rollback", "recovery", "failover",
+    "cross-system", "upstream", "downstream", "analyze logs",
+    "review configurations", "trace the issue",
+    "isolate the problem", "restore service",
+    "compare configurations", "check dependencies"
+]
+
+
 def calculate_complexity(description):
 
     text = description.lower()
-
-    words = text.split()
-
-    word_count = len(words)
-
-    # --------------------------------------------------------
-    # Technical terminology
-    # --------------------------------------------------------
-
-    technical_terms = [
-        "server",
-        "database",
-        "network",
-        "firewall",
-        "vpn",
-        "dns",
-        "dhcp",
-        "domain controller",
-        "authentication",
-        "authorization",
-        "certificate",
-        "encryption",
-        "endpoint",
-        "configuration",
-        "integration",
-        "synchronization",
-        "infrastructure",
-        "deployment",
-        "application",
-        "api",
-        "sql",
-        "driver",
-        "firmware",
-        "router",
-        "switch",
-        "latency",
-        "timeout",
-        "permission",
-        "access denied",
-        "service unavailable",
-        "memory",
-        "cpu",
-        "disk space",
-        "backup",
-        "replication",
-        "load balancer",
-        "active directory",
-        "identity provider",
-        "virtual machine",
-        "container",
-        "kubernetes",
-        "storage array",
-        "failover",
-        "cluster",
-        "ssl",
-        "tls",
-        "proxy",
-        "certificate authority",
-        "single sign-on",
-        "sso",
-        "mfa",
-        "ldap",
-        "microservice",
-        "api gateway",
-        "data pipeline",
-        "message queue",
-        "cloud infrastructure",
-        "operating system",
-        "power supply",
-        "raid controller"
-    ]
-
-    # --------------------------------------------------------
-    # Multiple symptoms and dependencies
-    # --------------------------------------------------------
-
-    complexity_indicators = [
-        "multiple",
-        "several",
-        "intermittent",
-        "simultaneously",
-        "across departments",
-        "all users",
-        "entire department",
-        "production",
-        "business critical",
-        "outage",
-        "after the update",
-        "after deployment",
-        "following the migration",
-        "root cause",
-        "dependency",
-        "cascading",
-        "recurring",
-        "unpredictable",
-        "inconsistent",
-        "partial failure",
-        "degraded performance",
-        "data corruption",
-        "synchronization failure",
-        "service disruption",
-        "authentication errors",
-        "connection failures",
-        "while",
-        "although",
-        "however",
-        "in addition",
-        "as a result",
-        "at the same time",
-        "without warning",
-        "across multiple systems"
-    ]
-
-    # --------------------------------------------------------
-    # Business and operational impact
-    # --------------------------------------------------------
-
-    impact_indicators = [
-        "critical",
-        "urgent",
-        "business impact",
-        "financial impact",
-        "security breach",
-        "data loss",
-        "data integrity",
-        "unauthorized access",
-        "ransomware",
-        "compliance",
-        "customer impact",
-        "system-wide",
-        "enterprise-wide",
-        "mission critical",
-        "complete outage",
-        "unavailable",
-        "failed transactions",
-        "production environment",
-        "business operations",
-        "sensitive information",
-        "service interruption",
-        "multiple departments",
-        "customer records"
-    ]
-
-    # --------------------------------------------------------
-    # Troubleshooting and investigation
-    # --------------------------------------------------------
-
-    investigation_indicators = [
-        "investigate",
-        "diagnose",
-        "troubleshoot",
-        "identify the root cause",
-        "logs indicate",
-        "monitoring shows",
-        "correlation",
-        "configuration mismatch",
-        "dependency failure",
-        "rollback",
-        "recovery",
-        "failover",
-        "cross-system",
-        "upstream",
-        "downstream",
-        "analyze logs",
-        "review configurations",
-        "trace the issue",
-        "isolate the problem",
-        "restore service",
-        "compare configurations",
-        "check dependencies"
-    ]
-
-    # --------------------------------------------------------
-    # Count indicators
-    # --------------------------------------------------------
+    word_count = len(text.split())
 
     technical_count = sum(
-        1 for term in technical_terms
-        if term in text
+        term in text for term in TECHNICAL_TERMS
     )
 
     indicator_count = sum(
-        1 for term in complexity_indicators
-        if term in text
+        term in text for term in COMPLEXITY_INDICATORS
     )
 
     impact_count = sum(
-        1 for term in impact_indicators
-        if term in text
+        term in text for term in IMPACT_INDICATORS
     )
 
     investigation_count = sum(
-        1 for term in investigation_indicators
-        if term in text
+        term in text for term in INVESTIGATION_INDICATORS
     )
-
-    # --------------------------------------------------------
-    # Weighted complexity score
-    # --------------------------------------------------------
 
     score = 0
 
-    # Description length.
     if word_count >= 15:
         score += 1
-
     if word_count >= 30:
         score += 2
-
     if word_count >= 50:
         score += 2
-
     if word_count >= 80:
         score += 2
 
-    # Technical complexity.
     score += min(technical_count * 2, 12)
-
-    # Multiple symptoms and dependencies.
     score += min(indicator_count * 2, 10)
-
-    # Business and operational impact.
     score += min(impact_count * 3, 12)
-
-    # Troubleshooting complexity.
     score += min(investigation_count * 2, 8)
 
     return {
@@ -414,12 +244,12 @@ def calculate_complexity(description):
 
 
 # ============================================================
-# ASSIGN DIFFICULTY LEVELS
+# ASSIGN DIFFICULTY
 # ============================================================
 
-def assign_difficulty(df, description_column):
+def assign_difficulty(df):
 
-    complexity = df[description_column].apply(
+    complexity = df["description"].apply(
         calculate_complexity
     )
 
@@ -428,13 +258,8 @@ def assign_difficulty(df, description_column):
         index=df.index
     )
 
-    df = pd.concat(
-        [df, complexity_df],
-        axis=1
-    )
+    df = pd.concat([df, complexity_df], axis=1)
 
-    # Divide the dataset into three relative complexity groups.
-    # Highest scores belong to Hard.
     df["difficulty"] = pd.qcut(
         df["complexity_score"].rank(method="first"),
         q=3,
@@ -453,42 +278,29 @@ def assign_difficulty(df, description_column):
 
 
 # ============================================================
-# GENERATE BALANCED TEST TICKETS
+# GENERATE TEST TICKETS
 # ============================================================
 
-def generate_test_tickets(df, description_column):
+def generate_test_tickets(df):
 
-    sample_size = min(
-        MAX_TICKETS,
-        len(df)
-    )
+    sample_size = min(MAX_TICKETS, len(df))
 
     if sample_size < 3:
-        raise ValueError(
-            "At least 3 valid tickets are required."
-        )
+        raise ValueError("At least 3 valid tickets are required.")
 
-    # Calculate target ticket counts.
     targets = {
         level: int(sample_size * percentage)
         for level, percentage in DIFFICULTY_DISTRIBUTION.items()
     }
 
-    # Assign rounding remainder to Hard.
-    targets["Hard"] += (
-        sample_size - sum(targets.values())
-    )
+    targets["Hard"] += sample_size - sum(targets.values())
 
-    print("\nTarget test distribution:")
-
-    for level, count in targets.items():
-        print(f"{level}: {count}")
+    print("\nTarget distribution:")
+    print(targets)
 
     selected = []
-
     remaining = df.copy()
 
-    # Select tickets from each difficulty category.
     for level in ["Easy", "Medium", "Hard"]:
 
         candidates = remaining[
@@ -496,11 +308,7 @@ def generate_test_tickets(df, description_column):
         ]
 
         requested = targets[level]
-
-        available = min(
-            requested,
-            len(candidates)
-        )
+        available = min(requested, len(candidates))
 
         if available > 0:
 
@@ -512,11 +320,8 @@ def generate_test_tickets(df, description_column):
 
             selected.append(sample)
 
-            remaining = remaining.drop(
-                index=sample.index
-            )
+            remaining = remaining.drop(index=sample.index)
 
-    # Fill missing slots if a category lacks enough records.
     selected_df = (
         pd.concat(selected)
         if selected
@@ -527,11 +332,6 @@ def generate_test_tickets(df, description_column):
 
     if missing > 0:
 
-        if len(remaining) < missing:
-            raise ValueError(
-                "Not enough unused records to complete test sample."
-            )
-
         additional = remaining.sample(
             n=missing,
             replace=False,
@@ -540,38 +340,31 @@ def generate_test_tickets(df, description_column):
 
         selected.append(additional)
 
-    sample = pd.concat(selected).sample(
-        frac=1,
-        random_state=RANDOM_STATE
-    ).reset_index(drop=True)
+    sample = (
+        pd.concat(selected)
+        .sample(frac=1, random_state=RANDOM_STATE)
+        .reset_index(drop=True)
+    )
 
     tickets = []
 
     for index, row in sample.iterrows():
 
         ticket = {
-            "ticket_id": (
-                f"TEST-{RUN_ID}-{index + 1:04d}"
-            ),
+            "ticket_id": f"TEST-{RUN_ID}-{index + 1:04d}",
 
-            "incident_id": (
-                f"INC-{RUN_ID}-{index + 1:06d}"
-            ),
+            "incident_id": f"INC-{RUN_ID}-{index + 1:06d}",
 
-            "description": row[description_column],
+            # Always preserve the original description.
+            "description": str(row["description"]),
 
-            # Expected model outputs.
             "actual_resolver_group": row["resolver_group"],
             "actual_priority": row["priority"],
 
-            # Difficulty information.
             "difficulty": str(row["difficulty"]),
 
             "word_count": int(row["word_count"]),
-
-            "complexity_score": int(
-                row["complexity_score"]
-            ),
+            "complexity_score": int(row["complexity_score"]),
 
             "technical_terms_count": int(
                 row["technical_terms_count"]
@@ -592,23 +385,16 @@ def generate_test_tickets(df, description_column):
 
         tickets.append(ticket)
 
-    print(f"\nGenerated {len(tickets)} test tickets.")
+    print(f"\nGenerated {len(tickets)} tickets.")
 
-    print("\nActual test distribution:")
+    print("\nFirst generated ticket:")
+    print(json.dumps(tickets[0], indent=4, ensure_ascii=False))
 
+    print("\nActual difficulty distribution:")
     print(
         pd.Series(
             [ticket["difficulty"] for ticket in tickets]
         ).value_counts()
-    )
-
-    print("\nSelected complexity scores:")
-
-    print(
-        pd.DataFrame(tickets)
-        .groupby("difficulty", observed=False)
-        ["complexity_score"]
-        .agg(["min", "mean", "max", "count"])
     )
 
     return tickets
@@ -620,14 +406,19 @@ def generate_test_tickets(df, description_column):
 
 def send_ticket(ticket):
 
+    # Preserve the original description in the result.
+    original_description = ticket["description"]
+
     payload = {
         "ticket_id": ticket["ticket_id"],
-        "incident_id": ticket["incident_id"],
-        "description": ticket["description"]
+        "description": original_description,
+        "incident_id": ticket["incident_id"]
     }
 
     result = {
         **ticket,
+
+        "description": original_description,
 
         "predicted_resolver_group": None,
         "predicted_priority": None,
@@ -638,6 +429,9 @@ def send_ticket(ticket):
         "ticket_status": None,
         "requires_human_review": None,
         "review_reasons": [],
+
+        "semantic_duplicate": None,
+        "semantic_duplicate_matches": [],
 
         "itsm_status": None,
         "automatic_assignment": None,
@@ -651,7 +445,6 @@ def send_ticket(ticket):
     }
 
     response = None
-
     start_time = time.perf_counter()
 
     try:
@@ -664,10 +457,7 @@ def send_ticket(ticket):
 
         elapsed = time.perf_counter() - start_time
 
-        result["response_time_seconds"] = round(
-            elapsed, 4
-        )
-
+        result["response_time_seconds"] = round(elapsed, 4)
         result["http_status_code"] = response.status_code
 
         response.raise_for_status()
@@ -675,46 +465,41 @@ def send_ticket(ticket):
         api_data = response.json()
 
         if not isinstance(api_data, dict):
-            raise ValueError(
-                "API returned an invalid JSON structure."
-            )
+            raise ValueError("API returned an invalid JSON structure.")
 
         # ----------------------------------------------------
-        # Extract ticket response
+        # Extract ticket object
         # ----------------------------------------------------
 
         returned_ticket = api_data.get("ticket")
 
         if not isinstance(returned_ticket, dict):
             raise ValueError(
-                "Missing or invalid ticket object."
+                "Missing or invalid ticket object in API response."
             )
 
-        prediction = returned_ticket.get(
-            "resolver_prediction"
-        )
+        # Use returned description only if it is non-empty.
+        # Otherwise keep the original dataset description.
+        returned_description = returned_ticket.get("description")
+
+        if isinstance(returned_description, str):
+            if returned_description.strip():
+                result["description"] = returned_description.strip()
+
+        prediction = returned_ticket.get("resolver_prediction")
 
         if not isinstance(prediction, dict):
             raise ValueError(
                 "Missing resolver_prediction object."
             )
 
-        predicted_resolver = prediction.get(
-            "resolver_group"
-        )
-
-        predicted_priority = prediction.get(
-            "priority"
-        )
+        predicted_resolver = prediction.get("resolver_group")
+        predicted_priority = prediction.get("priority")
 
         if not predicted_resolver:
-            raise ValueError(
-                "Resolver group prediction is missing."
-            )
+            raise ValueError("Resolver group prediction is missing.")
 
-        if predicted_priority not in {
-            "P1", "P2", "P3", "P4"
-        }:
+        if predicted_priority not in {"P1", "P2", "P3", "P4"}:
             raise ValueError(
                 f"Invalid priority: {predicted_priority}"
             )
@@ -732,49 +517,46 @@ def send_ticket(ticket):
         )
 
         if not 0 <= resolver_confidence <= 1:
-            raise ValueError(
-                "Invalid resolver confidence."
-            )
+            raise ValueError("Invalid resolver confidence.")
 
         if not 0 <= priority_confidence <= 1:
-            raise ValueError(
-                "Invalid priority confidence."
-            )
+            raise ValueError("Invalid priority confidence.")
+
+        result["predicted_resolver_group"] = predicted_resolver
+        result["predicted_priority"] = predicted_priority
+
+        result["resolver_confidence"] = resolver_confidence
+        result["priority_confidence"] = priority_confidence
+
+        result["ticket_status"] = returned_ticket.get(
+            "status", "UNKNOWN"
+        )
+
+        result["requires_human_review"] = returned_ticket.get(
+            "requires_human_review", False
+        )
+
+        result["review_reasons"] = returned_ticket.get(
+            "review_reasons", []
+        )
 
         # ----------------------------------------------------
-        # Save AI predictions
+        # Extract semantic duplicate information
         # ----------------------------------------------------
 
-        result["predicted_resolver_group"] = (
-            predicted_resolver
+        duplicate_data = api_data.get(
+            "semantic_duplicate_check", {}
         )
 
-        result["predicted_priority"] = (
-            predicted_priority
-        )
+        if isinstance(duplicate_data, dict):
 
-        result["resolver_confidence"] = (
-            resolver_confidence
-        )
-
-        result["priority_confidence"] = (
-            priority_confidence
-        )
-
-        result["ticket_status"] = (
-            returned_ticket.get("status", "UNKNOWN")
-        )
-
-        result["requires_human_review"] = (
-            returned_ticket.get(
-                "requires_human_review",
-                False
+            result["semantic_duplicate"] = duplicate_data.get(
+                "possible_duplicate"
             )
-        )
 
-        result["review_reasons"] = (
-            returned_ticket.get("review_reasons", [])
-        )
+            result["semantic_duplicate_matches"] = (
+                duplicate_data.get("matches", [])
+            )
 
         # ----------------------------------------------------
         # Extract ITSM response
@@ -790,9 +572,7 @@ def send_ticket(ticket):
         if not isinstance(itsm_response, dict):
             itsm_response = {}
 
-        itsm_incident = itsm_response.get(
-            "incident", {}
-        )
+        itsm_incident = itsm_response.get("incident", {})
 
         if not isinstance(itsm_incident, dict):
             itsm_incident = {}
@@ -806,9 +586,7 @@ def send_ticket(ticket):
         result["automatic_assignment"] = (
             itsm_data.get("automatic_assignment")
             if "automatic_assignment" in itsm_data
-            else itsm_response.get(
-                "automatic_assignment"
-            )
+            else itsm_response.get("automatic_assignment")
         )
 
         result["itsm_incident_id"] = (
@@ -819,7 +597,7 @@ def send_ticket(ticket):
 
         result["api_status"] = "SUCCESS"
 
-        # Keep full response for JSON debugging.
+        # Retain full response for troubleshooting.
         result["api_response"] = api_data
 
     except requests.exceptions.ConnectionError:
@@ -850,17 +628,21 @@ def send_ticket(ticket):
 
     except requests.exceptions.RequestException as exc:
 
-        result["error"] = f"Request error: {str(exc)}"
+        result["error"] = f"Request error: {exc}"
 
     except Exception as exc:
 
-        result["error"] = f"Unexpected error: {str(exc)}"
+        result["error"] = f"Unexpected error: {exc}"
+
+    # Ensure description is never lost.
+    if not result.get("description"):
+        result["description"] = original_description
 
     return result
 
 
 # ============================================================
-# RUN ALL TESTS
+# RUN TESTS
 # ============================================================
 
 def run_tests(tickets):
@@ -872,7 +654,6 @@ def run_tests(tickets):
     for index, ticket in enumerate(tickets, start=1):
 
         result = send_ticket(ticket)
-
         results.append(result)
 
         if result["api_status"] == "SUCCESS":
@@ -881,14 +662,12 @@ def run_tests(tickets):
                 f"[{index}/{len(tickets)}] "
                 f"[{ticket['difficulty'].upper():6}] "
                 f"{ticket['ticket_id']} | "
-                f"Resolver: "
-                f"{result['predicted_resolver_group']} "
+                f"Resolver: {result['predicted_resolver_group']} "
                 f"({result['resolver_confidence']:.2%}) | "
-                f"Priority: "
-                f"{result['predicted_priority']} "
+                f"Priority: {result['predicted_priority']} "
                 f"({result['priority_confidence']:.2%}) | "
-                f"Human Review: "
-                f"{result['requires_human_review']}"
+                f"Duplicate: {result['semantic_duplicate']} | "
+                f"Human Review: {result['requires_human_review']}"
             )
 
         else:
@@ -906,7 +685,7 @@ def run_tests(tickets):
 
 
 # ============================================================
-# BUILD CLASSIFICATION REPORT
+# CLASSIFICATION REPORT
 # ============================================================
 
 def build_classification_report(
@@ -929,7 +708,7 @@ def build_classification_report(
 
 
 # ============================================================
-# BUILD CATEGORY STATISTICS
+# CATEGORY STATISTICS
 # ============================================================
 
 def build_category_statistics(
@@ -946,8 +725,7 @@ def build_category_statistics(
     working = successful.copy()
 
     working["is_correct"] = (
-        working[actual_column]
-        == working[predicted_column]
+        working[actual_column] == working[predicted_column]
     )
 
     stats = (
@@ -958,14 +736,11 @@ def build_category_statistics(
             Average_Confidence=(confidence_column, "mean")
         )
         .reset_index()
-        .rename(columns={
-            actual_column: display_column
-        })
+        .rename(columns={actual_column: display_column})
     )
 
     stats["Accuracy"] = (
-        stats["Correct_Predictions"]
-        / stats["Total_Tickets"]
+        stats["Correct_Predictions"] / stats["Total_Tickets"]
     )
 
     return stats
@@ -980,7 +755,7 @@ def build_difficulty_statistics(successful):
     if successful.empty:
         return pd.DataFrame()
 
-    stats = (
+    return (
         successful.groupby("difficulty", observed=False)
         .agg(
             Total_Tickets=("ticket_id", "count"),
@@ -989,13 +764,8 @@ def build_difficulty_statistics(successful):
                 "complexity_score", "mean"
             ),
 
-            Resolver_Accuracy=(
-                "resolver_correct", "mean"
-            ),
-
-            Priority_Accuracy=(
-                "priority_correct", "mean"
-            ),
+            Resolver_Accuracy=("resolver_correct", "mean"),
+            Priority_Accuracy=("priority_correct", "mean"),
 
             Average_Resolver_Confidence=(
                 "resolver_confidence", "mean"
@@ -1015,8 +785,6 @@ def build_difficulty_statistics(successful):
         )
         .reset_index()
     )
-
-    return stats
 
 
 # ============================================================
@@ -1085,9 +853,7 @@ def generate_report(results):
     # --------------------------------------------------------
 
     total_tickets = len(df)
-
     successful_count = len(successful)
-
     failed_count = len(failed)
 
     human_review_count = (
@@ -1125,14 +891,16 @@ def generate_report(results):
         if not successful.empty else 0
     )
 
+    duplicate_count = (
+        int(successful["semantic_duplicate"].fillna(False).sum())
+        if not successful.empty else 0
+    )
+
     summary = {
         "Run ID": RUN_ID,
         "Run Timestamp": RUN_TIMESTAMP,
-
         "Total Tickets": total_tickets,
-
         "Successful API Requests": successful_count,
-
         "Failed API Requests": failed_count,
 
         "API Success Rate": (
@@ -1141,28 +909,16 @@ def generate_report(results):
         ),
 
         "Resolver Accuracy": resolver_accuracy,
-
         "Priority Accuracy": priority_accuracy,
 
-        "Automatically Assigned Tickets": (
-            automatic_assignment_count
-        ),
+        "Semantic Duplicates Detected": duplicate_count,
 
-        "Tickets Requiring Human Review": (
-            human_review_count
-        ),
+        "Automatically Assigned Tickets": automatic_assignment_count,
+        "Tickets Requiring Human Review": human_review_count,
 
-        "Average Response Time (Seconds)": (
-            average_response_time
-        ),
-
-        "Maximum Response Time (Seconds)": (
-            max_response_time
-        ),
-
-        "Minimum Response Time (Seconds)": (
-            min_response_time
-        )
+        "Average Response Time (Seconds)": average_response_time,
+        "Maximum Response Time (Seconds)": max_response_time,
+        "Minimum Response Time (Seconds)": min_response_time
     }
 
     summary_df = pd.DataFrame(
@@ -1171,7 +927,7 @@ def generate_report(results):
     )
 
     # --------------------------------------------------------
-    # Resolver statistics
+    # Resolver and priority statistics
     # --------------------------------------------------------
 
     resolver_stats = build_category_statistics(
@@ -1182,10 +938,6 @@ def generate_report(results):
         "Resolver Group"
     )
 
-    # --------------------------------------------------------
-    # Priority statistics
-    # --------------------------------------------------------
-
     priority_stats = build_category_statistics(
         successful,
         "actual_priority",
@@ -1194,13 +946,7 @@ def generate_report(results):
         "Priority"
     )
 
-    # --------------------------------------------------------
-    # Difficulty statistics
-    # --------------------------------------------------------
-
-    difficulty_stats = build_difficulty_statistics(
-        successful
-    )
+    difficulty_stats = build_difficulty_statistics(successful)
 
     # --------------------------------------------------------
     # API errors
@@ -1215,26 +961,17 @@ def generate_report(results):
         "error"
     ]
 
-    if not failed.empty:
-
-        errors_df = failed[
-            error_columns
-        ].copy()
-
-    else:
-
-        errors_df = pd.DataFrame(
-            columns=error_columns
-        )
-
-    # --------------------------------------------------------
-    # Export JSON
-    # --------------------------------------------------------
-
-    OUTPUT_JSON.parent.mkdir(
-        parents=True,
-        exist_ok=True
+    errors_df = (
+        failed[error_columns].copy()
+        if not failed.empty
+        else pd.DataFrame(columns=error_columns)
     )
+
+    # --------------------------------------------------------
+    # EXPORT JSON
+    # --------------------------------------------------------
+
+    OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
 
     json_results = []
 
@@ -1250,13 +987,9 @@ def generate_report(results):
 
     json_output = {
         "run_id": RUN_ID,
-
         "run_timestamp": RUN_TIMESTAMP,
-
         "total_tickets": total_tickets,
-
         "successful_requests": successful_count,
-
         "failed_requests": failed_count,
 
         "difficulty_distribution": (
@@ -1281,13 +1014,19 @@ def generate_report(results):
         )
 
     # --------------------------------------------------------
-    # Prepare Excel results
+    # EXPORT EXCEL
     # --------------------------------------------------------
+
+    OUTPUT_EXCEL.parent.mkdir(parents=True, exist_ok=True)
 
     excel_results = df.drop(
         columns=["api_response"],
         errors="ignore"
     ).copy()
+
+    # Keep description explicitly as a report column.
+    if "description" not in excel_results.columns:
+        excel_results["description"] = ""
 
     excel_results["review_reasons"] = (
         excel_results["review_reasons"].apply(
@@ -1297,13 +1036,12 @@ def generate_report(results):
         )
     )
 
-    # --------------------------------------------------------
-    # Export Excel
-    # --------------------------------------------------------
-
-    OUTPUT_EXCEL.parent.mkdir(
-        parents=True,
-        exist_ok=True
+    excel_results["semantic_duplicate_matches"] = (
+        excel_results["semantic_duplicate_matches"].apply(
+            lambda value: json.dumps(value, ensure_ascii=False)
+            if isinstance(value, (list, dict))
+            else str(value)
+        )
     )
 
     with pd.ExcelWriter(
@@ -1343,14 +1081,12 @@ def generate_report(results):
 
         resolver_report.to_excel(
             writer,
-            sheet_name="Resolver Classification",
-            index=True
+            sheet_name="Resolver Classification"
         )
 
         priority_report.to_excel(
             writer,
-            sheet_name="Priority Classification",
-            index=True
+            sheet_name="Priority Classification"
         )
 
         errors_df.to_excel(
@@ -1363,7 +1099,7 @@ def generate_report(results):
 
 
 # ============================================================
-# PRINT FINAL SUMMARY
+# PRINT SUMMARY
 # ============================================================
 
 def print_summary(summary):
@@ -1378,7 +1114,6 @@ def print_summary(summary):
 
             if "Accuracy" in metric or "Rate" in metric:
                 print(f"{metric}: {value:.2%}")
-
             else:
                 print(f"{metric}: {value:.4f}")
 
@@ -1386,9 +1121,7 @@ def print_summary(summary):
             print(f"{metric}: {value}")
 
     print("\nGenerated files:")
-
     print(f"JSON:  {OUTPUT_JSON.resolve()}")
-
     print(f"Excel: {OUTPUT_EXCEL.resolve()}")
 
     print("=" * 80)
@@ -1403,19 +1136,13 @@ def main():
     try:
 
         # 1. Load dataset.
-        df, description_column = load_dataset()
+        df = load_dataset()
 
-        # 2. Calculate complexity.
-        df = assign_difficulty(
-            df,
-            description_column
-        )
+        # 2. Calculate complexity and difficulty.
+        df = assign_difficulty(df)
 
         # 3. Generate test tickets.
-        tickets = generate_test_tickets(
-            df,
-            description_column
-        )
+        tickets = generate_test_tickets(df)
 
         # 4. Send tickets to AI API.
         results = run_tests(tickets)
@@ -1423,13 +1150,12 @@ def main():
         # 5. Generate reports.
         summary = generate_report(results)
 
-        # 6. Print summary.
+        # 6. Print final summary.
         print_summary(summary)
 
     except Exception as exc:
 
         print("\nTEST EXECUTION FAILED")
-
         print(f"Error: {str(exc)}")
 
         raise

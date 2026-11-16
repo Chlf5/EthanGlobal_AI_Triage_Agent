@@ -25,8 +25,10 @@ data/raw/
 data/processed/
 
 # Trained models
-models_trained/
-prod_model/
+ethan_resolver_model_10000_2
+ethan_resolver_model_10000
+ethan_resolver_model_2000
+ethan_resolver_model_modern
 
 # Logs
 logs/
