@@ -1,0 +1,11 @@
+{
+  "ticket_id": "123213123",
+  "description": "Following a scheduled infrastructure update, multiple employees across the company are unable to authenticate to internal applications. Active Directory authentication requests are intermittently timing out, while domain controllers report replication delays. VPN users are also experiencing repeated login failures. The issue affects several departments and is preventing access to the ERP and CRM platforms. Restarting the affected services temporarily restores access, but the failures return after approximately 15 minutes. The infrastructure team has not identified the root cause."
+}
+
+----------------
+
+{
+  "ticket_id": "123213123",
+  "description": "The office printer on the second floor is not printing documents. Users can send print jobs, but nothing comes out.Restarting the printer did not fix the problem."
+}

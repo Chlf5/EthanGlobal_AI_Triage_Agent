@@ -25,7 +25,7 @@ data/raw/
 data/processed/
 
 # Trained models
-models/
+models_trained/
 prod_model/
 
 # Logs
