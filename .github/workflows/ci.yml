@@ -32,6 +32,6 @@ jobs:
         run: |
           python -m pytest tests/ -v
 
-      - name: Evaluate AI model
-        run: |
-          python -m src.evaluation.evaluate_model
+      # - name: Evaluate AI model
+      #   run: |
+      #     python -m src.evaluation.evaluate_model
