@@ -2,11 +2,11 @@
 def test_prediction_response():
     from src.services.ticket_service import generate_prediction_result
 
-  ticket = {
-    "ticket_id": "CI-001",
-    "description": "Employee cannot connect to the company Wi-Fi network.",
-    "incident_id": "TEST_550505"
-}
+    ticket = {
+        "ticket_id": "CI-001",
+        "description": "Employee cannot connect to the company Wi-Fi network.",
+        "incident_id": None
+    }
 
     result = generate_prediction_result(ticket)
 
