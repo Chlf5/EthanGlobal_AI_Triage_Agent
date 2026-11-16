@@ -24,8 +24,12 @@ __pycache__/
 data/raw/
 data/processed/
 
-# Trained models
+# Ignore all trained models
 models_trained/*
+
+# Keep only ModernBERT v2
+!models_trained/ethan_multitask_modernbert_v2/
+!models_trained/ethan_multitask_modernbert_v2/*
 
 # Logs
 logs/
