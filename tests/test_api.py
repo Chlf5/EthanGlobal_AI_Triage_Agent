@@ -5,7 +5,7 @@ def test_prediction_response():
     ticket = {
         "ticket_id": "CI-001",
         "description": "Employee cannot connect to the company Wi-Fi network.",
-        "incident_id": None
+        "incident_id": "Test_1234"
     }
 
     result = generate_prediction_result(ticket)
