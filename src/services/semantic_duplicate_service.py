@@ -272,12 +272,16 @@ def find_semantic_duplicates(
     logger.info("=" * 60)
 
     return {
-        "message": "Duplicate detected. Previous AI result reused.",
-        "ticket": existing_ticket,
-        "semantic_duplicate_check": duplicate_result,
-        "itsm": {
-            "status": "Skipped",
-            "reason": "Previous processed ticket reused."
-        }
+        "possible_duplicate": possible_duplicate,
+        "threshold": SIMILARITY_THRESHOLD,
+        "total_reference_tickets": len(reference_tickets),
+        "matches_found": len(matches),
+        "similarity": similarity,
+        "matches": matches,
+        "message": (
+            "Similar tickets found."
+            if possible_duplicate
+            else "No similar tickets found."
+        )
     
     }

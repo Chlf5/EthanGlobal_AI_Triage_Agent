@@ -164,6 +164,20 @@ def normalize_ai_ticket(data, request):
             detail="AI API did not return a valid ticket object."
         )
 
+    semantic_duplicate_check = data.get("semantic_duplicate_check", {})
+
+    if not isinstance(semantic_duplicate_check, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="AI API returned an invalid semantic duplicate check."
+        )
+
+    if semantic_duplicate_check.get("possible_duplicate", False):
+        raise HTTPException(
+            status_code=409,
+            detail="Same ticket already exists."
+        )
+
     prediction = ticket.get("resolver_prediction")
 
     if not isinstance(prediction, dict):
